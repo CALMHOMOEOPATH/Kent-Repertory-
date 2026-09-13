@@ -1,4 +1,4 @@
-import 'dart:convert';
+          import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -102,7 +102,8 @@ class RepertoryEngine {
   }
 
   static Future<bool> _shouldRefreshBundledDatabase(
-      String dbPath) async {
+    String dbPath,
+  ) async {
     try {
       final existing = File(dbPath);
 
@@ -131,7 +132,8 @@ class RepertoryEngine {
   }
 
   static Future<void> _installBundledDatabase(
-      String dbPath) async {
+    String dbPath,
+  ) async {
     final destination = File(dbPath);
     final staged = File('$dbPath.staged');
 
@@ -187,7 +189,8 @@ class RepertoryEngine {
   };
 
   static Future<List<String>> fetchOnlineSynonyms(
-      String word) async {
+    String word,
+  ) async {
     try {
       final res = await http
           .get(
@@ -213,7 +216,8 @@ class RepertoryEngine {
   }
 
   static Future<List<String>> tokenizeKeywords(
-      String query) async {
+    String query,
+  ) async {
     String clean = query.toLowerCase();
 
     _builtInSynonyms.forEach((k, v) {
@@ -269,17 +273,21 @@ class RepertoryEngine {
   // sulph.
   // SULPH
   //
-  // They will all be treated as the same remedy.
-  static String _normalizeRemedy(String abbreviation) {
+  // They are all treated as the same remedy.
+  static String _normalizeRemedy(
+    String abbreviation,
+  ) {
     return abbreviation
         .trim()
         .toLowerCase()
         .replaceAll(RegExp(r'[.\s]+$'), '');
   }
 
-  // Keeps an existing Kent-style capitalization when available.
-  // Otherwise capitalizes the first letter only.
-  static String _displayRemedy(String abbreviation) {
+  // Keeps an existing Kent-style capitalization when
+  // available. Otherwise capitalizes the first letter.
+  static String _displayRemedy(
+    String abbreviation,
+  ) {
     final trimmed = abbreviation.trim();
 
     if (trimmed.isEmpty) {
@@ -297,8 +305,103 @@ class RepertoryEngine {
         trimmed.substring(1);
   }
 
+  // ------------------------------------------------------------
+  // BUILD THE TRUE KENT RUBRIC HIERARCHY
+  // ------------------------------------------------------------
+  //
+  // IMPORTANT:
+  // We do NOT split full_path at commas.
+  //
+  // Instead we follow the actual parent_id relationships in
+  // the validated database.
+  //
+  // Example:
+  //
+  // URINATION
+  //   -> dribbling by drops
+  //      -> frequent
+  //
+  // becomes:
+  //
+  // URINATION → dribbling by drops → frequent
+  //
+  static Future<Map<int, String>> _buildHierarchyPaths(
+    Database db,
+    List<int> rubricIds,
+  ) async {
+    if (rubricIds.isEmpty) {
+      return {};
+    }
+
+    final placeholders =
+        List.filled(rubricIds.length, '?').join(', ');
+
+    final rows = await db.rawQuery(
+      '''
+      WITH RECURSIVE rubric_chain AS (
+        SELECT
+          r.id AS root_id,
+          r.id AS rubric_id,
+          r.parent_id AS parent_id,
+          r.rubric_text AS rubric_text,
+          0 AS depth
+        FROM rubrics r
+        WHERE r.id IN ($placeholders)
+
+        UNION ALL
+
+        SELECT
+          rc.root_id,
+          parent.id AS rubric_id,
+          parent.parent_id AS parent_id,
+          parent.rubric_text AS rubric_text,
+          rc.depth + 1 AS depth
+        FROM rubric_chain rc
+        INNER JOIN rubrics parent
+          ON parent.id = rc.parent_id
+        WHERE rc.depth < 20
+      )
+
+      SELECT
+        root_id,
+        rubric_text,
+        depth
+      FROM rubric_chain
+      ORDER BY root_id ASC, depth DESC
+      ''',
+      rubricIds,
+    );
+
+    final Map<int, List<String>> partsByRoot = {};
+
+    for (final row in rows) {
+      final rootId = row['root_id'] as int;
+      final text =
+          row['rubric_text'] as String? ?? '';
+
+      if (text.trim().isEmpty) {
+        continue;
+      }
+
+      partsByRoot.putIfAbsent(
+        rootId,
+        () => [],
+      ).add(text.trim());
+    }
+
+    final Map<int, String> result = {};
+
+    for (final entry in partsByRoot.entries) {
+      result[entry.key] =
+          entry.value.join(' → ');
+    }
+
+    return result;
+  }
+
   static Future<List<RubricResult>> searchSymptom(
-      String rawQuery) async {
+    String rawQuery,
+  ) async {
     final db = await database;
 
     final keywords =
@@ -364,7 +467,8 @@ class RepertoryEngine {
     final Map<int, RubricResult> mappedResults = {};
 
     for (final row in rows) {
-      final int id = row['rubric_id'] as int;
+      final int id =
+          row['rubric_id'] as int;
 
       if (!mappedResults.containsKey(id)) {
         mappedResults[id] = RubricResult(
@@ -391,31 +495,60 @@ class RepertoryEngine {
       }
     }
 
+    // Replace the flattened full_path with the actual
+    // parent/subrubric hierarchy.
+    final hierarchyPaths =
+        await _buildHierarchyPaths(
+      db,
+      mappedResults.keys.toList(),
+    );
+
+    final results =
+        mappedResults.values.toList();
+
+    for (final result in results) {
+      final hierarchy =
+          hierarchyPaths[result.id];
+
+      if (hierarchy != null &&
+          hierarchy.isNotEmpty) {
+        // RubricResult is immutable, so replace it with
+        // a new object containing the hierarchical display.
+        mappedResults[result.id] =
+            RubricResult(
+          id: result.id,
+          chapter: result.chapter,
+          fullPath: hierarchy,
+          pageNumber: result.pageNumber,
+          remedies: result.remedies,
+        );
+      }
+    }
+
     return mappedResults.values.toList();
   }
 
   /// Repertorizes the selected Kent rubrics.
   ///
-  /// Remedy identity is normalized case-insensitively so
-  /// different capitalization of the same remedy is merged.
+  /// Remedy identity is normalized case-insensitively.
   ///
   /// If the same normalized remedy occurs more than once
   /// for the same rubric, only the highest grade is counted.
-  ///
-  /// Results are sorted by:
-  /// 1. Total marks - highest first
-  /// 2. Rubrics covered - highest first
-  /// 3. Remedy name - A to Z
   static Future<List<RepertorizationResult>> repertorize(
-      List<int> rubricIds) async {
+    List<int> rubricIds,
+  ) async {
     if (rubricIds.isEmpty) {
       return [];
     }
 
     final placeholders =
-        List.filled(rubricIds.length, '?').join(', ');
+        List.filled(
+          rubricIds.length,
+          '?',
+        ).join(', ');
 
-    final rows = await (await database).rawQuery(
+    final rows =
+        await (await database).rawQuery(
       '''
       SELECT
         rem.id AS remedy_id,
@@ -433,7 +566,8 @@ class RepertoryEngine {
       rubricIds,
     );
 
-    final Map<String, _RemedyAggregate> grouped = {};
+    final Map<String, _RemedyAggregate> grouped =
+        {};
 
     for (final row in rows) {
       final abbreviation =
@@ -455,7 +589,8 @@ class RepertoryEngine {
       final grade =
           (row['grade'] as num?)?.toInt() ?? 1;
 
-      final aggregate = grouped.putIfAbsent(
+      final aggregate =
+          grouped.putIfAbsent(
         normalized,
         () => _RemedyAggregate(
           abbreviation:
@@ -465,7 +600,9 @@ class RepertoryEngine {
         ),
       );
 
-      if (!aggregate.remedyIds.contains(remedyId)) {
+      if (!aggregate.remedyIds.contains(
+        remedyId,
+      )) {
         aggregate.remedyIds.add(remedyId);
       }
 
@@ -478,8 +615,8 @@ class RepertoryEngine {
             grade;
       }
 
-      // Prefer a properly capitalized display form
-      // if one exists in the database.
+      // Prefer a properly capitalized form
+      // when available in the database.
       final candidateDisplay =
           _displayRemedy(abbreviation);
 
@@ -498,7 +635,8 @@ class RepertoryEngine {
       }
     }
 
-    final results = grouped.values.map((item) {
+    final results =
+        grouped.values.map((item) {
       final totalMarks =
           item.gradesByRubric.values.fold<int>(
         0,
@@ -507,7 +645,9 @@ class RepertoryEngine {
 
       return RepertorizationResult(
         remedyIds:
-            List.unmodifiable(item.remedyIds),
+            List.unmodifiable(
+          item.remedyIds,
+        ),
         abbreviation:
             item.abbreviation,
         totalMarks:
@@ -517,13 +657,15 @@ class RepertoryEngine {
       );
     }).toList();
 
-    // REQUIRED SORTING:
-    // 1. Marks: highest first
-    // 2. Rubrics covered: highest first
-    // 3. Remedy name: alphabetical A-Z
+    // Current default sorting:
+    // 1. Marks - highest first
+    // 2. Rubrics covered - highest first
+    // 3. Remedy - alphabetical A-Z
     results.sort((a, b) {
       final marksCompare =
-          b.totalMarks.compareTo(a.totalMarks);
+          b.totalMarks.compareTo(
+        a.totalMarks,
+      );
 
       if (marksCompare != 0) {
         return marksCompare;
@@ -548,11 +690,8 @@ class RepertoryEngine {
     return results;
   }
 
-  /// Returns the selected rubrics covered by one
-  /// or more internal remedy IDs.
-  ///
-  /// If the database contains case-variant duplicate
-  /// remedy IDs, the highest grade for each rubric is used.
+  /// Returns the selected rubrics covered by
+  /// one or more internal remedy IDs.
   static Future<List<RubricCoverage>> remedyCoverage({
     required List<int> remedyIds,
     required List<int> rubricIds,
@@ -564,18 +703,20 @@ class RepertoryEngine {
 
     final remedyPlaceholders =
         List.filled(
-      remedyIds.length,
-      '?',
-    ).join(', ');
+          remedyIds.length,
+          '?',
+        ).join(', ');
 
     final rubricPlaceholders =
         List.filled(
-      rubricIds.length,
-      '?',
-    ).join(', ');
+          rubricIds.length,
+          '?',
+        ).join(', ');
+
+    final db = await database;
 
     final rows =
-        await (await database).rawQuery(
+        await db.rawQuery(
       '''
       SELECT
         r.id AS rubric_id,
@@ -621,9 +762,34 @@ class RepertoryEngine {
       }
     }
 
+    // Build the real hierarchy for the
+    // Remedy Detail screen too.
+    final hierarchyPaths =
+        await _buildHierarchyPaths(
+      db,
+      byId.keys.toList(),
+    );
+
+    final Map<int, RubricCoverage> updated =
+        {};
+
+    for (final entry in byId.entries) {
+      final hierarchy =
+          hierarchyPaths[entry.key];
+
+      updated[entry.key] =
+          RubricCoverage(
+        rubricId: entry.value.rubricId,
+        fullPath:
+            hierarchy ??
+                entry.value.fullPath,
+        grade: entry.value.grade,
+      );
+    }
+
     return rubricIds
-        .where(byId.containsKey)
-        .map((id) => byId[id]!)
+        .where(updated.containsKey)
+        .map((id) => updated[id]!)
         .toList();
   }
 }
