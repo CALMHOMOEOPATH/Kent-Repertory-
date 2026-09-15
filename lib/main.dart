@@ -507,7 +507,7 @@ class TotalityScreen extends StatelessWidget {
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
                         child: Text(
-                          '${rubrics.length} selected rubric${rubrics.length == 1 ? '' : 's'} — grades will be summed from Kent’s database.',
+                          '${rubrics.length} selected rubric${rubrics.length == 1 ? '' : 's'} — numbered in case order.',
                           style: const TextStyle(fontWeight: FontWeight.w600),
                         ),
                       ),
@@ -516,9 +516,15 @@ class TotalityScreen extends StatelessWidget {
                           itemCount: rubrics.length,
                           itemBuilder: (_, index) {
                             final rubric = rubrics[index];
+                            final sNo = index + 1;
                             return ListTile(
-                              leading: CircleAvatar(child: Text('${index + 1}')),
-                              title: Text(rubric.fullPath),
+                              leading: CircleAvatar(child: Text('$sNo')),
+                              title: Text(
+                                'S.No. $sNo — ${rubric.fullPath}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
                               subtitle: Text('Page ${rubric.pageNumber}'),
                               trailing: IconButton(
                                 icon: const Icon(Icons.remove_circle_outline),
@@ -569,11 +575,12 @@ class TotalityScreen extends StatelessWidget {
 
 class RepertorizationResultsScreen extends StatefulWidget {
   final List<RubricResult> rubrics;
-  const RepertorizationResultsScreen({super.key, required this.rubrics});
+   const RepertorizationResultsScreen({super.key, required this.rubrics});
   @override
   State<RepertorizationResultsScreen> createState() =>
       _RepertorizationResultsScreenState();
 }
+
 class _RepertorizationResultsScreenState
     extends State<RepertorizationResultsScreen> {
   late final Future<List<RepertorizationResult>> _resultsFuture;
@@ -761,7 +768,7 @@ class _RemedyDetailScreenState extends State<RemedyDetailScreen> {
     super.initState();
     _coverage = RepertoryEngine.remedyCoverage(
       remedyIds: widget.result.remedyIds,
-      rubricIds: widget.rubrics.map((rubric) => rubric.id).toList(),
+      rubrics: widget.rubrics,
     );
   }
 
@@ -796,26 +803,36 @@ class _RemedyDetailScreenState extends State<RemedyDetailScreen> {
                 const SizedBox(height: 6),
                 Text(
                   '${widget.result.totalMarks} marks / ${widget.result.rubricsCovered} of ${widget.rubrics.length} rubrics',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
                 ),
                 const Divider(height: 32),
                 const Text(
-                  'Covered selected rubrics',
+                  'Covered Rubrics & Assigned Marks',
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
                 ),
                 const SizedBox(height: 8),
                 ...coverage.map(
                   (item) => Card(
                     child: ListTile(
-                      leading:
-                          const Icon(Icons.check_circle, color: Colors.teal),
-                      title: Text(item.fullPath),
-                      trailing: Chip(label: Text('${item.grade}')),
+                      leading: CircleAvatar(
+                        child: Text('${item.serialNumber}'),
+                      ),
+                      title: Text(
+                        'S.No. ${item.serialNumber} — ${item.fullPath}',
+                        style: const TextStyle(fontWeight: FontWeight.w600),
+                      ),
+                      trailing: Chip(
+                        label: Text(
+                          '${item.grade} ${item.grade == 1 ? 'mark' : 'marks'}',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                      ),
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 16),
                 Text(
-                  'Total: ${widget.result.totalMarks}',
+                  'Total Marks: ${widget.result.totalMarks}',
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 18,
