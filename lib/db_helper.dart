@@ -1,8 +1,6 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -188,36 +186,7 @@ class RepertoryEngine {
     'vomiting': 'stomach nausea',
   };
 
-  static Future<List<String>> fetchOnlineSynonyms(
-    String word,
-  ) async {
-    try {
-      final res = await http
-          .get(
-            Uri.parse(
-              'https://api.datamuse.com/words?rel_syn=$word',
-            ),
-          )
-          .timeout(const Duration(seconds: 2));
-
-      if (res.statusCode == 200) {
-        final List data = jsonDecode(res.body);
-
-        return data
-            .take(2)
-            .map(
-              (e) => e['word'].toString().toLowerCase(),
-            )
-            .toList();
-      }
-    } catch (_) {}
-
-    return [];
-  }
-
-  static Future<List<String>> tokenizeKeywords(
-    String query,
-  ) async {
+  static List<String> tokenizeKeywords(String query) {
     String clean = query.toLowerCase();
 
     _builtInSynonyms.forEach((k, v) {
@@ -245,40 +214,21 @@ class RepertoryEngine {
         .replaceAll(RegExp(r'[^a-zA-Z0-9\s]'), '')
         .split(RegExp(r'\s+'))
         .where(
-          (w) =>
-              w.length > 1 &&
-              !stopWords.contains(w),
+          (w) => w.length > 1 && !stopWords.contains(w),
         )
         .toList();
 
-    final List<String> resolvedKeywords = [];
-
-    for (final token in rawTokens) {
-      resolvedKeywords.add(token);
-
-      if (token.length > 4) {
-        final onlineSyns =
-            await fetchOnlineSynonyms(token);
-
-        resolvedKeywords.addAll(onlineSyns);
-      }
-    }
-
-    return resolvedKeywords.toSet().toList();
+    return rawTokens.toSet().toList();
   }
 
-  static String _normalizeRemedy(
-    String abbreviation,
-  ) {
+  static String _normalizeRemedy(String abbreviation) {
     return abbreviation
         .trim()
         .toLowerCase()
         .replaceAll(RegExp(r'[.\s]+$'), '');
   }
 
-  static String _displayRemedy(
-    String abbreviation,
-  ) {
+  static String _displayRemedy(String abbreviation) {
     final trimmed = abbreviation.trim();
 
     if (trimmed.isEmpty) {
@@ -292,12 +242,9 @@ class RepertoryEngine {
       return trimmed;
     }
 
-    return first.toUpperCase() +
-        trimmed.substring(1);
+    return first.toUpperCase() + trimmed.substring(1);
   }
 
-  // Splits text at the first comma not enclosed in parentheses.
-  // Example: "URINATION , dribbling (by drops)" -> ["URINATION", "dribbling (by drops)"]
   static List<String> _splitRootCompound(String text) {
     int parenDepth = 0;
     for (int i = 0; i < text.length; i++) {
@@ -326,8 +273,7 @@ class RepertoryEngine {
       return {};
     }
 
-    final placeholders =
-        List.filled(rubricIds.length, '?').join(', ');
+    final placeholders = List.filled(rubricIds.length, '?').join(', ');
 
     final rows = await db.rawQuery(
       '''
@@ -354,7 +300,7 @@ class RepertoryEngine {
         FROM rubric_chain rc
         INNER JOIN rubrics parent
           ON parent.id = rc.parent_id
-        WHERE rc.depth < 20
+        WHERE rc.depth < 8
       )
 
       SELECT
@@ -389,8 +335,6 @@ class RepertoryEngine {
         if (text.isEmpty) continue;
 
         if (i == 0) {
-          // If level jumps directly from level 0 to level 2 or greater,
-          // extract the missing level 1 from the comma notation.
           if (chain.length > 1) {
             final nextLevel = chain[1]['db_level'] as int? ?? 1;
             if (nextLevel - level > 1) {
@@ -414,13 +358,10 @@ class RepertoryEngine {
     return result;
   }
 
-  static Future<List<RubricResult>> searchSymptom(
-    String rawQuery,
-  ) async {
+  static Future<List<RubricResult>> searchSymptom(String rawQuery) async {
     final db = await database;
 
-    final keywords =
-        await tokenizeKeywords(rawQuery);
+    final keywords = tokenizeKeywords(rawQuery);
 
     if (keywords.isEmpty) {
       return [];
@@ -454,7 +395,13 @@ class RepertoryEngine {
         rem.abbreviation,
         rr.grade
 
-      FROM rubrics r
+      FROM (
+        SELECT id, chapter_id, full_path, page_number
+        FROM rubrics r
+        WHERE ${whereClauses.join(' AND ')}
+        ORDER BY r.page_number ASC, r.id ASC
+        LIMIT 60
+      ) r
 
       INNER JOIN chapters c
         ON c.id = r.chapter_id
@@ -468,33 +415,24 @@ class RepertoryEngine {
       LEFT JOIN remedies rem
         ON rr.remedy_id = rem.id
 
-      WHERE ${whereClauses.join(' AND ')}
-
       ORDER BY
         r.page_number ASC,
         r.id ASC
-
-      LIMIT 120
     ''';
 
-    final rows =
-        await db.rawQuery(sql, whereArgs);
+    final rows = await db.rawQuery(sql, whereArgs);
 
     final Map<int, RubricResult> mappedResults = {};
 
     for (final row in rows) {
-      final int id =
-          row['rubric_id'] as int;
+      final int id = row['rubric_id'] as int;
 
       if (!mappedResults.containsKey(id)) {
         mappedResults[id] = RubricResult(
           id: id,
-          chapter:
-              row['chapter'] as String? ?? '',
-          fullPath:
-              row['full_path'] as String? ?? '',
-          pageNumber:
-              row['page_number'] as int? ?? 0,
+          chapter: row['chapter'] as String? ?? '',
+          fullPath: row['full_path'] as String? ?? '',
+          pageNumber: row['page_number'] as int? ?? 0,
           remedies: [],
         );
       }
@@ -502,24 +440,18 @@ class RepertoryEngine {
       if (row['abbreviation'] != null) {
         mappedResults[id]!.remedies.add(
           RemedyGrade(
-            abbrev:
-                row['abbreviation'] as String,
-            grade:
-                (row['grade'] as num?)?.toInt() ?? 1,
+            abbrev: row['abbreviation'] as String,
+            grade: (row['grade'] as num?)?.toInt() ?? 1,
           ),
         );
       }
     }
 
-    final hierarchyPaths =
-        await _buildHierarchyPaths(
+    final hierarchyPaths = await _buildHierarchyPaths(
       db,
       mappedResults.keys.toList(),
     );
 
-    // Deduplicate identical rubrics that share the same chapter,
-    // page number, and rendered hierarchy path, while preserving and
-    // merging remedy coverage.
     final Map<String, RubricResult> uniqueResults = {};
 
     for (final result in mappedResults.values) {
@@ -535,7 +467,6 @@ class RepertoryEngine {
           remedies: List.of(result.remedies),
         );
       } else {
-        // Merge remedies without duplication, keeping the highest grade
         final existingRemedies = uniqueResults[key]!.remedies;
         for (final remedy in result.remedies) {
           final idx = existingRemedies.indexWhere(
@@ -560,14 +491,9 @@ class RepertoryEngine {
       return [];
     }
 
-    final placeholders =
-        List.filled(
-          rubricIds.length,
-          '?',
-        ).join(', ');
+    final placeholders = List.filled(rubricIds.length, '?').join(', ');
 
-    final rows =
-        await (await database).rawQuery(
+    final rows = await (await database).rawQuery(
       '''
       SELECT
         rem.id AS remedy_id,
@@ -588,31 +514,21 @@ class RepertoryEngine {
     final Map<String, _RemedyAggregate> grouped = {};
 
     for (final row in rows) {
-      final abbreviation =
-          row['abbreviation'] as String? ?? '';
-
-      final normalized =
-          _normalizeRemedy(abbreviation);
+      final abbreviation = row['abbreviation'] as String? ?? '';
+      final normalized = _normalizeRemedy(abbreviation);
 
       if (normalized.isEmpty) {
         continue;
       }
 
-      final remedyId =
-          row['remedy_id'] as int;
+      final remedyId = row['remedy_id'] as int;
+      final rubricId = row['rubric_id'] as int;
+      final grade = (row['grade'] as num?)?.toInt() ?? 1;
 
-      final rubricId =
-          row['rubric_id'] as int;
-
-      final grade =
-          (row['grade'] as num?)?.toInt() ?? 1;
-
-      final aggregate =
-          grouped.putIfAbsent(
+      final aggregate = grouped.putIfAbsent(
         normalized,
         () => _RemedyAggregate(
-          abbreviation:
-              _displayRemedy(abbreviation),
+          abbreviation: _displayRemedy(abbreviation),
           remedyIds: [],
           gradesByRubric: {},
         ),
@@ -622,22 +538,17 @@ class RepertoryEngine {
         aggregate.remedyIds.add(remedyId);
       }
 
-      final existingGrade =
-          aggregate.gradesByRubric[rubricId];
+      final existingGrade = aggregate.gradesByRubric[rubricId];
 
-      if (existingGrade == null ||
-          grade > existingGrade) {
+      if (existingGrade == null || grade > existingGrade) {
         aggregate.gradesByRubric[rubricId] = grade;
       }
 
-      final candidateDisplay =
-          _displayRemedy(abbreviation);
-
+      final candidateDisplay = _displayRemedy(abbreviation);
       if (candidateDisplay.isNotEmpty) {
         final first = candidateDisplay.substring(0, 1);
         final isCapitalized =
-            first == first.toUpperCase() &&
-            first != first.toLowerCase();
+            first == first.toUpperCase() && first != first.toLowerCase();
 
         if (isCapitalized) {
           aggregate.abbreviation = candidateDisplay;
@@ -645,10 +556,8 @@ class RepertoryEngine {
       }
     }
 
-    final results =
-        grouped.values.map((item) {
-      final totalMarks =
-          item.gradesByRubric.values.fold<int>(
+    final results = grouped.values.map((item) {
+      final totalMarks = item.gradesByRubric.values.fold<int>(
         0,
         (sum, grade) => sum + grade,
       );
@@ -662,12 +571,10 @@ class RepertoryEngine {
     }).toList();
 
     results.sort((a, b) {
-      final marksCompare =
-          b.totalMarks.compareTo(a.totalMarks);
+      final marksCompare = b.totalMarks.compareTo(a.totalMarks);
       if (marksCompare != 0) return marksCompare;
 
-      final coverageCompare =
-          b.rubricsCovered.compareTo(a.rubricsCovered);
+      final coverageCompare = b.rubricsCovered.compareTo(a.rubricsCovered);
       if (coverageCompare != 0) return coverageCompare;
 
       return a.abbreviation
@@ -686,10 +593,8 @@ class RepertoryEngine {
       return [];
     }
 
-    final remedyPlaceholders =
-        List.filled(remedyIds.length, '?').join(', ');
-    final rubricPlaceholders =
-        List.filled(rubricIds.length, '?').join(', ');
+    final remedyPlaceholders = List.filled(remedyIds.length, '?').join(', ');
+    final rubricPlaceholders = List.filled(rubricIds.length, '?').join(', ');
 
     final db = await database;
 
@@ -731,8 +636,7 @@ class RepertoryEngine {
       }
     }
 
-    final hierarchyPaths =
-        await _buildHierarchyPaths(
+    final hierarchyPaths = await _buildHierarchyPaths(
       db,
       byId.keys.toList(),
     );
