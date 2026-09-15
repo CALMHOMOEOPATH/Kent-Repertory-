@@ -66,7 +66,7 @@ class RepertoryEngine {
   static Database? _db;
 
   static const _databaseFileName = 'kent_repertory.db';
-  static const _bundledDatabaseVersion = 2;
+  static const _bundledDatabaseVersion = 3;
   static const _storedDatabaseVersionKey =
       'kent_repertory_database_version';
 
@@ -296,6 +296,28 @@ class RepertoryEngine {
         trimmed.substring(1);
   }
 
+  // Splits text at the first comma not enclosed in parentheses.
+  // Example: "URINATION , dribbling (by drops)" -> ["URINATION", "dribbling (by drops)"]
+  static List<String> _splitRootCompound(String text) {
+    int parenDepth = 0;
+    for (int i = 0; i < text.length; i++) {
+      final char = text[i];
+      if (char == '(') {
+        parenDepth++;
+      } else if (char == ')') {
+        if (parenDepth > 0) parenDepth--;
+      } else if (char == ',' && parenDepth == 0) {
+        final head = text.substring(0, i).trim();
+        final tail = text.substring(i + 1).trim();
+        if (head.isNotEmpty && tail.isNotEmpty) {
+          return [head, tail];
+        }
+        break;
+      }
+    }
+    return [text.trim()];
+  }
+
   static Future<Map<int, String>> _buildHierarchyPaths(
     Database db,
     List<int> rubricIds,
@@ -315,6 +337,7 @@ class RepertoryEngine {
           r.id AS rubric_id,
           r.parent_id AS parent_id,
           r.rubric_text AS rubric_text,
+          r.level AS db_level,
           0 AS depth
         FROM rubrics r
         WHERE r.id IN ($placeholders)
@@ -326,6 +349,7 @@ class RepertoryEngine {
           parent.id AS rubric_id,
           parent.parent_id AS parent_id,
           parent.rubric_text AS rubric_text,
+          parent.level AS db_level,
           rc.depth + 1 AS depth
         FROM rubric_chain rc
         INNER JOIN rubrics parent
@@ -335,7 +359,9 @@ class RepertoryEngine {
 
       SELECT
         root_id,
+        rubric_id,
         rubric_text,
+        db_level,
         depth
       FROM rubric_chain
       ORDER BY root_id ASC, depth DESC
@@ -343,28 +369,46 @@ class RepertoryEngine {
       rubricIds,
     );
 
-    final Map<int, List<String>> partsByRoot = {};
-
+    final Map<int, List<Map<String, dynamic>>> chainByRoot = {};
     for (final row in rows) {
       final rootId = row['root_id'] as int;
-      final text =
-          row['rubric_text'] as String? ?? '';
-
-      if (text.trim().isEmpty) {
-        continue;
-      }
-
-      partsByRoot.putIfAbsent(
-        rootId,
-        () => [],
-      ).add(text.trim());
+      chainByRoot.putIfAbsent(rootId, () => []).add(row);
     }
 
     final Map<int, String> result = {};
 
-    for (final entry in partsByRoot.entries) {
-      result[entry.key] =
-          entry.value.join(' → ');
+    for (final entry in chainByRoot.entries) {
+      final chain = entry.value;
+      final List<String> resolvedLevels = [];
+
+      for (int i = 0; i < chain.length; i++) {
+        final current = chain[i];
+        final text = (current['rubric_text'] as String? ?? '').trim();
+        final level = current['db_level'] as int? ?? 0;
+
+        if (text.isEmpty) continue;
+
+        if (i == 0) {
+          // If level jumps directly from level 0 to level 2 or greater,
+          // extract the missing level 1 from the comma notation.
+          if (chain.length > 1) {
+            final nextLevel = chain[1]['db_level'] as int? ?? 1;
+            if (nextLevel - level > 1) {
+              final split = _splitRootCompound(text);
+              if (split.length > 1) {
+                resolvedLevels.add(split[0]);
+                resolvedLevels.add(split[1]);
+                continue;
+              }
+            }
+          }
+          resolvedLevels.add(text);
+        } else {
+          resolvedLevels.add(text);
+        }
+      }
+
+      result[entry.key] = resolvedLevels.join(' → ');
     }
 
     return result;
@@ -473,27 +517,40 @@ class RepertoryEngine {
       mappedResults.keys.toList(),
     );
 
-    final results =
-        mappedResults.values.toList();
+    // Deduplicate identical rubrics that share the same chapter,
+    // page number, and rendered hierarchy path, while preserving and
+    // merging remedy coverage.
+    final Map<String, RubricResult> uniqueResults = {};
 
-    for (final result in results) {
-      final hierarchy =
-          hierarchyPaths[result.id];
+    for (final result in mappedResults.values) {
+      final hierarchy = hierarchyPaths[result.id] ?? result.fullPath;
+      final key = '${result.chapter}_${result.pageNumber}_$hierarchy';
 
-      if (hierarchy != null &&
-          hierarchy.isNotEmpty) {
-        mappedResults[result.id] =
-            RubricResult(
+      if (!uniqueResults.containsKey(key)) {
+        uniqueResults[key] = RubricResult(
           id: result.id,
           chapter: result.chapter,
           fullPath: hierarchy,
           pageNumber: result.pageNumber,
-          remedies: result.remedies,
+          remedies: List.of(result.remedies),
         );
+      } else {
+        // Merge remedies without duplication, keeping the highest grade
+        final existingRemedies = uniqueResults[key]!.remedies;
+        for (final remedy in result.remedies) {
+          final idx = existingRemedies.indexWhere(
+            (r) => r.abbrev.toLowerCase() == remedy.abbrev.toLowerCase(),
+          );
+          if (idx == -1) {
+            existingRemedies.add(remedy);
+          } else if (remedy.grade > existingRemedies[idx].grade) {
+            existingRemedies[idx] = remedy;
+          }
+        }
       }
     }
 
-    return mappedResults.values.toList();
+    return uniqueResults.values.toList();
   }
 
   static Future<List<RepertorizationResult>> repertorize(
