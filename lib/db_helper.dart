@@ -1,4 +1,4 @@
-          import 'dart:convert';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/services.dart';
@@ -267,13 +267,6 @@ class RepertoryEngine {
     return resolvedKeywords.toSet().toList();
   }
 
-  // Creates one internal identity for remedies such as:
-  // sulph
-  // Sulph
-  // sulph.
-  // SULPH
-  //
-  // They are all treated as the same remedy.
   static String _normalizeRemedy(
     String abbreviation,
   ) {
@@ -283,8 +276,6 @@ class RepertoryEngine {
         .replaceAll(RegExp(r'[.\s]+$'), '');
   }
 
-  // Keeps an existing Kent-style capitalization when
-  // available. Otherwise capitalizes the first letter.
   static String _displayRemedy(
     String abbreviation,
   ) {
@@ -305,26 +296,6 @@ class RepertoryEngine {
         trimmed.substring(1);
   }
 
-  // ------------------------------------------------------------
-  // BUILD THE TRUE KENT RUBRIC HIERARCHY
-  // ------------------------------------------------------------
-  //
-  // IMPORTANT:
-  // We do NOT split full_path at commas.
-  //
-  // Instead we follow the actual parent_id relationships in
-  // the validated database.
-  //
-  // Example:
-  //
-  // URINATION
-  //   -> dribbling by drops
-  //      -> frequent
-  //
-  // becomes:
-  //
-  // URINATION → dribbling by drops → frequent
-  //
   static Future<Map<int, String>> _buildHierarchyPaths(
     Database db,
     List<int> rubricIds,
@@ -416,9 +387,10 @@ class RepertoryEngine {
 
     for (final token in keywords) {
       whereClauses.add(
-        '(r.full_path LIKE ? OR c.name LIKE ?)',
+        '(r.full_path LIKE ? OR c.name LIKE ? OR (pc.name IS NOT NULL AND pc.name LIKE ?))',
       );
 
+      whereArgs.add('%$token%');
       whereArgs.add('%$token%');
       whereArgs.add('%$token%');
     }
@@ -495,8 +467,6 @@ class RepertoryEngine {
       }
     }
 
-    // Replace the flattened full_path with the actual
-    // parent/subrubric hierarchy.
     final hierarchyPaths =
         await _buildHierarchyPaths(
       db,
@@ -512,8 +482,6 @@ class RepertoryEngine {
 
       if (hierarchy != null &&
           hierarchy.isNotEmpty) {
-        // RubricResult is immutable, so replace it with
-        // a new object containing the hierarchical display.
         mappedResults[result.id] =
             RubricResult(
           id: result.id,
@@ -528,12 +496,6 @@ class RepertoryEngine {
     return mappedResults.values.toList();
   }
 
-  /// Repertorizes the selected Kent rubrics.
-  ///
-  /// Remedy identity is normalized case-insensitively.
-  ///
-  /// If the same normalized remedy occurs more than once
-  /// for the same rubric, only the highest grade is counted.
   static Future<List<RepertorizationResult>> repertorize(
     List<int> rubricIds,
   ) async {
@@ -566,8 +528,7 @@ class RepertoryEngine {
       rubricIds,
     );
 
-    final Map<String, _RemedyAggregate> grouped =
-        {};
+    final Map<String, _RemedyAggregate> grouped = {};
 
     for (final row in rows) {
       final abbreviation =
@@ -600,9 +561,7 @@ class RepertoryEngine {
         ),
       );
 
-      if (!aggregate.remedyIds.contains(
-        remedyId,
-      )) {
+      if (!aggregate.remedyIds.contains(remedyId)) {
         aggregate.remedyIds.add(remedyId);
       }
 
@@ -611,26 +570,20 @@ class RepertoryEngine {
 
       if (existingGrade == null ||
           grade > existingGrade) {
-        aggregate.gradesByRubric[rubricId] =
-            grade;
+        aggregate.gradesByRubric[rubricId] = grade;
       }
 
-      // Prefer a properly capitalized form
-      // when available in the database.
       final candidateDisplay =
           _displayRemedy(abbreviation);
 
       if (candidateDisplay.isNotEmpty) {
-        final first =
-            candidateDisplay.substring(0, 1);
-
+        final first = candidateDisplay.substring(0, 1);
         final isCapitalized =
             first == first.toUpperCase() &&
             first != first.toLowerCase();
 
         if (isCapitalized) {
-          aggregate.abbreviation =
-              candidateDisplay;
+          aggregate.abbreviation = candidateDisplay;
         }
       }
     }
@@ -644,79 +597,46 @@ class RepertoryEngine {
       );
 
       return RepertorizationResult(
-        remedyIds:
-            List.unmodifiable(
-          item.remedyIds,
-        ),
-        abbreviation:
-            item.abbreviation,
-        totalMarks:
-            totalMarks,
-        rubricsCovered:
-            item.gradesByRubric.length,
+        remedyIds: List.unmodifiable(item.remedyIds),
+        abbreviation: item.abbreviation,
+        totalMarks: totalMarks,
+        rubricsCovered: item.gradesByRubric.length,
       );
     }).toList();
 
-    // Current default sorting:
-    // 1. Marks - highest first
-    // 2. Rubrics covered - highest first
-    // 3. Remedy - alphabetical A-Z
     results.sort((a, b) {
       final marksCompare =
-          b.totalMarks.compareTo(
-        a.totalMarks,
-      );
-
-      if (marksCompare != 0) {
-        return marksCompare;
-      }
+          b.totalMarks.compareTo(a.totalMarks);
+      if (marksCompare != 0) return marksCompare;
 
       final coverageCompare =
-          b.rubricsCovered.compareTo(
-        a.rubricsCovered,
-      );
-
-      if (coverageCompare != 0) {
-        return coverageCompare;
-      }
+          b.rubricsCovered.compareTo(a.rubricsCovered);
+      if (coverageCompare != 0) return coverageCompare;
 
       return a.abbreviation
           .toLowerCase()
-          .compareTo(
-            b.abbreviation.toLowerCase(),
-          );
+          .compareTo(b.abbreviation.toLowerCase());
     });
 
     return results;
   }
 
-  /// Returns the selected rubrics covered by
-  /// one or more internal remedy IDs.
   static Future<List<RubricCoverage>> remedyCoverage({
     required List<int> remedyIds,
     required List<int> rubricIds,
   }) async {
-    if (remedyIds.isEmpty ||
-        rubricIds.isEmpty) {
+    if (remedyIds.isEmpty || rubricIds.isEmpty) {
       return [];
     }
 
     final remedyPlaceholders =
-        List.filled(
-          remedyIds.length,
-          '?',
-        ).join(', ');
-
+        List.filled(remedyIds.length, '?').join(', ');
     final rubricPlaceholders =
-        List.filled(
-          rubricIds.length,
-          '?',
-        ).join(', ');
+        List.filled(rubricIds.length, '?').join(', ');
 
     final db = await database;
 
-    final rows =
-        await db.rawQuery(
+    final rows = await db.rawQuery(
       '''
       SELECT
         r.id AS rubric_id,
@@ -737,52 +657,37 @@ class RepertoryEngine {
       ],
     );
 
-    final Map<int, RubricCoverage> byId =
-        {};
+    final Map<int, RubricCoverage> byId = {};
 
     for (final row in rows) {
-      final rubricId =
-          row['rubric_id'] as int;
+      final rubricId = row['rubric_id'] as int;
+      final grade = (row['grade'] as num).toInt();
 
-      final grade =
-          (row['grade'] as num).toInt();
+      final existing = byId[rubricId];
 
-      final existing =
-          byId[rubricId];
-
-      if (existing == null ||
-          grade > existing.grade) {
-        byId[rubricId] =
-            RubricCoverage(
+      if (existing == null || grade > existing.grade) {
+        byId[rubricId] = RubricCoverage(
           rubricId: rubricId,
-          fullPath:
-              row['full_path'] as String,
+          fullPath: row['full_path'] as String,
           grade: grade,
         );
       }
     }
 
-    // Build the real hierarchy for the
-    // Remedy Detail screen too.
     final hierarchyPaths =
         await _buildHierarchyPaths(
       db,
       byId.keys.toList(),
     );
 
-    final Map<int, RubricCoverage> updated =
-        {};
+    final Map<int, RubricCoverage> updated = {};
 
     for (final entry in byId.entries) {
-      final hierarchy =
-          hierarchyPaths[entry.key];
+      final hierarchy = hierarchyPaths[entry.key];
 
-      updated[entry.key] =
-          RubricCoverage(
+      updated[entry.key] = RubricCoverage(
         rubricId: entry.value.rubricId,
-        fullPath:
-            hierarchy ??
-                entry.value.fullPath,
+        fullPath: hierarchy ?? entry.value.fullPath,
         grade: entry.value.grade,
       );
     }
