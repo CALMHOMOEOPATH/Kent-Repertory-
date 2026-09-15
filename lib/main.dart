@@ -156,13 +156,22 @@ class _RepertorySearchScreenState extends State<RepertorySearchScreen> {
       });
       return;
     }
+
     setState(() => _searching = true);
-    final results = await RepertoryEngine.searchSymptom(query);
-    if (!mounted || request != _searchRequest) return;
-    setState(() {
-      _rubricResults = results;
-      _searching = false;
-    });
+
+    try {
+      final results = await RepertoryEngine.searchSymptom(query);
+      if (!mounted || request != _searchRequest) return;
+      setState(() {
+        _rubricResults = results;
+      });
+    } catch (e) {
+      debugPrint('Search error: $e');
+    } finally {
+      if (mounted && request == _searchRequest) {
+        setState(() => _searching = false);
+      }
+    }
   }
 
   void _addRubric(RubricResult rubric) {
@@ -565,7 +574,6 @@ class RepertorizationResultsScreen extends StatefulWidget {
   State<RepertorizationResultsScreen> createState() =>
       _RepertorizationResultsScreenState();
 }
-
 class _RepertorizationResultsScreenState
     extends State<RepertorizationResultsScreen> {
   late final Future<List<RepertorizationResult>> _resultsFuture;
