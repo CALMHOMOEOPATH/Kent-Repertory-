@@ -49,11 +49,13 @@ class RepertorizationResult {
 }
 
 class RubricCoverage {
+  final int serialNumber;
   final int rubricId;
   final String fullPath;
   final int grade;
 
   const RubricCoverage({
+    required this.serialNumber,
     required this.rubricId,
     required this.fullPath,
     required this.grade,
@@ -592,12 +594,13 @@ class RepertoryEngine {
 
   static Future<List<RubricCoverage>> remedyCoverage({
     required List<int> remedyIds,
-    required List<int> rubricIds,
+    required List<RubricResult> rubrics,
   }) async {
-    if (remedyIds.isEmpty || rubricIds.isEmpty) {
+    if (remedyIds.isEmpty || rubrics.isEmpty) {
       return [];
     }
 
+    final rubricIds = rubrics.map((r) => r.id).toList();
     final remedyPlaceholders = List.filled(remedyIds.length, '?').join(', ');
     final rubricPlaceholders = List.filled(rubricIds.length, '?').join(', ');
 
@@ -624,44 +627,33 @@ class RepertoryEngine {
       ],
     );
 
-    final Map<int, RubricCoverage> byId = {};
-
+    final Map<int, int> gradeMap = {};
     for (final row in rows) {
       final rubricId = row['rubric_id'] as int;
       final grade = (row['grade'] as num).toInt();
+      final existing = gradeMap[rubricId];
+      if (existing == null || grade > existing) {
+        gradeMap[rubricId] = grade;
+      }
+    }
 
-      final existing = byId[rubricId];
+    final List<RubricCoverage> coverageList = [];
 
-      if (existing == null || grade > existing.grade) {
-        byId[rubricId] = RubricCoverage(
-          rubricId: rubricId,
-          fullPath: row['full_path'] as String,
-          grade: grade,
+    for (int i = 0; i < rubrics.length; i++) {
+      final item = rubrics[i];
+      if (gradeMap.containsKey(item.id)) {
+        coverageList.add(
+          RubricCoverage(
+            serialNumber: i + 1,
+            rubricId: item.id,
+            fullPath: item.fullPath,
+            grade: gradeMap[item.id]!,
+          ),
         );
       }
     }
 
-    final hierarchyPaths = await _buildHierarchyPaths(
-      db,
-      byId.keys.toList(),
-    );
-
-    final Map<int, RubricCoverage> updated = {};
-
-    for (final entry in byId.entries) {
-      final hierarchy = hierarchyPaths[entry.key];
-
-      updated[entry.key] = RubricCoverage(
-        rubricId: entry.value.rubricId,
-        fullPath: hierarchy ?? entry.value.fullPath,
-        grade: entry.value.grade,
-      );
-    }
-
-    return rubricIds
-        .where(updated.containsKey)
-        .map((id) => updated[id]!)
-        .toList();
+    return coverageList;
   }
 }
 
