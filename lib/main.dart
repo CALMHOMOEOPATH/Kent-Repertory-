@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:otp/otp.dart';
 
 import 'db_helper.dart';
 
@@ -59,13 +60,162 @@ class AppSettings extends ChangeNotifier {
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  final settings = AppSettings(await SharedPreferences.getInstance())..load();
-  runApp(KentRepertoryApp(settings: settings));
+  final prefs = await SharedPreferences.getInstance();
+  final settings = AppSettings(prefs)..load();
+  final isActivated = prefs.getBool('is_activated') ?? false;
+
+  runApp(
+    KentRepertoryApp(
+      settings: settings,
+      showActivation: !isActivated,
+    ),
+  );
+}
+
+class OtpActivationScreen extends StatefulWidget {
+  const OtpActivationScreen({super.key, required this.settings});
+
+  final AppSettings settings;
+
+  @override
+  State<OtpActivationScreen> createState() => _OtpActivationScreenState();
+}
+
+class _OtpActivationScreenState extends State<OtpActivationScreen> {
+  final TextEditingController _otpInput = TextEditingController();
+  String _errorText = '';
+
+  static const String _secretKey = "JBSWY3DPEHPK3PXP";
+
+  bool _validateOtp(String code) {
+    final cleanCode = code.trim();
+    if (cleanCode.length != 6) return false;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    for (final offset in [-30000, 0, 30000]) {
+      final generated = OTP.generateTOTPCodeString(
+        _secretKey,
+        now + offset,
+        interval: 30,
+        length: 6,
+        algorithm: Algorithm.SHA1,
+        isGoogle: true,
+      );
+
+      if (cleanCode == generated) return true;
+    }
+
+    return false;
+  }
+
+  Future<void> _submit() async {
+    if (_validateOtp(_otpInput.text)) {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('is_activated', true);
+
+      if (!mounted) return;
+
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => KentRepertoryApp(
+            settings: widget.settings,
+            showActivation: false,
+          ),
+        ),
+      );
+    } else {
+      setState(() {
+        _errorText =
+            "Invalid or expired key. Please check current OTP.";
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _otpInput.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text("First-Time Setup")),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Icon(Icons.vpn_key_rounded, size: 70),
+              const SizedBox(height: 16),
+              const Text(
+                "App Activation Required",
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                "Enter the 6-digit dynamic code from Google Authenticator to activate offline repertory storage.",
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              TextField(
+                controller: _otpInput,
+                keyboardType: TextInputType.number,
+                maxLength: 6,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 26,
+                  letterSpacing: 6,
+                  fontWeight: FontWeight.bold,
+                ),
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  hintText: "000000",
+                  counterText: "",
+                ),
+              ),
+              if (_errorText.isNotEmpty) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _errorText,
+                  style: const TextStyle(color: Colors.red),
+                ),
+              ],
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: _submit,
+                  child: const Text(
+                    "Activate Once",
+                    style: TextStyle(fontSize: 16),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class KentRepertoryApp extends StatelessWidget {
-  const KentRepertoryApp({super.key, required this.settings});
+  const KentRepertoryApp({
+    super.key,
+    required this.settings,
+    required this.showActivation,
+  });
+
   final AppSettings settings;
+  final bool showActivation;
 
   ThemeData _theme(Brightness brightness) {
     final colors =
@@ -87,7 +237,12 @@ class KentRepertoryApp extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) => AnimatedBuilder(
+  Widget build(BuildContext context) {
+    if (showActivation) {
+      return OtpActivationScreen(settings: settings);
+    }
+
+    return AnimatedBuilder(
         animation: settings,
         builder: (context, _) => MaterialApp(
           title: 'KENT REPERTORY FOR STUDENTS',
